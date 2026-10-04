@@ -19,6 +19,7 @@ class XSenseApp extends Homey.App {
 
     // MQTT Health Tracking (NEW)
     this.mqttHealthy = new Map(); // houseId → boolean
+    this.mqttHealthChangedAt = new Map(); // houseId → epoch ms of last change
 
     // Command guardrails and audit trail
     this.commandCooldowns = new Map();
@@ -422,11 +423,31 @@ class XSenseApp extends Homey.App {
    * Set MQTT health status for a house
    * Called by XSenseAPI when MQTT connects/disconnects
    */
-  setMQTTHealth(houseId, isHealthy) {
+  setMQTTHealth(houseId, isHealthy, reason = '') {
     const previous = this.mqttHealthy.get(houseId);
     this.mqttHealthy.set(houseId, isHealthy);
-    if (previous !== isHealthy) {
-      this.log(`MQTT health changed: ${isHealthy ? 'HEALTHY' : 'UNHEALTHY'}`);
+    if (previous === isHealthy) return;
+
+    const now = Date.now();
+    const since = this.mqttHealthChangedAt.get(houseId);
+    const held = since ? ` (previous state held ${Math.round((now - since) / 1000)}s)` : '';
+    this.mqttHealthChangedAt.set(houseId, now);
+    this.log(`MQTT health house=${houseId}: ${isHealthy ? 'HEALTHY' : 'UNHEALTHY'}${reason ? ` - ${reason}` : ''}${held}`);
+
+    this._pushMQTTHealthToDevices(houseId);
+  }
+
+  _pushMQTTHealthToDevices(houseId) {
+    try {
+      for (const driver of Object.values(this.homey.drivers.getDrivers())) {
+        for (const device of driver.getDevices()) {
+          if (device.deviceData?.houseId !== houseId) continue;
+          if (typeof device.syncMQTTConnectedCapability !== 'function') continue;
+          device.syncMQTTConnectedCapability().catch((error) => this.error('MQTT status push failed:', error));
+        }
+      }
+    } catch (error) {
+      this.error('Failed to push MQTT health to devices:', error);
     }
   }
 
