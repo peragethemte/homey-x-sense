@@ -30,8 +30,17 @@ class HeatDetectorDevice extends XSenseDeviceBase {
     // Call base implementation first
     await super._handleDeviceUpdate(deviceData);
 
-    // Heat detector uses the same base implementation (alarm_heat, temperature, battery)
-    // No heat-specific overrides needed
+    if (deviceData?.normalizedEvent === 'self_test') await this._triggerTestDetected();
+  }
+
+  // A remote test can be reported both by testAlarm() and by the self-test shadow
+  async _triggerTestDetected() {
+    const now = Date.now();
+    if (this._lastTestTriggerAt && now - this._lastTestTriggerAt < 30000) return;
+    this._lastTestTriggerAt = now;
+    await this.homey.flow.getDeviceTriggerCard('smoke_test_detected')
+      .trigger(this, { device: this.getName() })
+      .catch((error) => this.error('Failed to trigger smoke_test_detected for heat detector:', error));
   }
 
   /**
@@ -40,12 +49,7 @@ class HeatDetectorDevice extends XSenseDeviceBase {
   async testAlarm() {
     try {
       await this.api.testAlarm(this.deviceData.id);
-
-      await this.homey.flow.getDeviceTriggerCard('smoke_test_detected')
-        .trigger(this, {
-          device: this.getName(),
-        })
-        .catch((error) => this.error('Failed to trigger smoke_test_detected for heat detector:', error));
+      await this._triggerTestDetected();
 
       return true;
     } catch (error) {

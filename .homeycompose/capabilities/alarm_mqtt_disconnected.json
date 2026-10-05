@@ -1,0 +1,10 @@
+{
+  "type": "boolean",
+  "title": {
+    "en": "MQTT Disconnected",
+    "de": "MQTT getrennt"
+  },
+  "getable": true,
+  "setable": false,
+  "uiComponent": "sensor"
+}

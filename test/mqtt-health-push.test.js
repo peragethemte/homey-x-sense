@@ -15,6 +15,7 @@ Module._load = function load(request, ...rest) {
 };
 const XSenseApp = require('../app');
 const XSenseDeviceBase = require('../lib/XSenseDeviceBase');
+const XSenseAPI = require('../lib/XSenseAPI');
 Module._load = originalLoad;
 
 function makeApp(devices) {
@@ -23,13 +24,19 @@ function makeApp(devices) {
   app.error = () => {};
   app.mqttHealthy = new Map();
   app.mqttHealthChangedAt = new Map();
-  app.homey = { drivers: { getDrivers: () => ({ d: { getDevices: () => devices } }) } };
+  app.mqttLinkDown = new Map();
+  app.mqttLinkDownTimers = new Map();
+  app.homey = {
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (timer) => clearTimeout(timer),
+    drivers: { getDrivers: () => ({ d: { getDevices: () => devices } }) },
+  };
   return app;
 }
 
-function makeDevice(houseId, app) {
+function makeDevice(houseId, app, initial = false) {
   const device = Object.create(XSenseDeviceBase.prototype);
-  const caps = new Map([['alarm_mqtt_connected', true]]);
+  const caps = new Map([['alarm_mqtt_disconnected', initial]]);
   device.homey = { app };
   device.deviceData = { houseId };
   device.writes = [];
@@ -40,7 +47,28 @@ function makeDevice(houseId, app) {
   return device;
 }
 
-test('health change is pushed to every device of the house and no other house', async () => {
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+test('reconnect blips shorter than the grace period never reach device tiles', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const devices = [];
+  const app = makeApp(devices);
+  const device = makeDevice('house-1', app);
+  devices.push(device);
+
+  app.setMQTTHealth('house-1', true, 'connected');
+  app.setMQTTHealth('house-1', false, 'reconnect');
+  t.mock.timers.tick(59000);
+  app.setMQTTHealth('house-1', true, 'connected');
+  t.mock.timers.tick(5000);
+  await flush();
+
+  assert.deepEqual(device.writes, []);
+  assert.equal(app.isMQTTLinkDown('house-1'), false);
+});
+
+test('outage longer than the grace period marks every device of the house, and only that house', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const devices = [];
   const app = makeApp(devices);
   const a = makeDevice('house-1', app);
@@ -48,43 +76,37 @@ test('health change is pushed to every device of the house and no other house', 
   const other = makeDevice('house-2', app);
   devices.push(a, b, other);
 
-  app.setMQTTHealth('house-1', false, 'test');
-  await new Promise((resolve) => setImmediate(resolve));
-
-  assert.deepEqual(a.writes, [false]);
-  assert.deepEqual(b.writes, [false]);
+  app.setMQTTHealth('house-1', true, 'connected');
+  app.setMQTTHealth('house-1', false, 'closed');
+  t.mock.timers.tick(60000);
+  await flush();
+  assert.deepEqual(a.writes, [true]);
+  assert.deepEqual(b.writes, [true]);
   assert.deepEqual(other.writes, []);
+
+  app.setMQTTHealth('house-1', true, 'connected');
+  await flush();
+  assert.deepEqual(a.writes, [true, false]);
 });
 
-test('unchanged health does not rewrite capabilities', async () => {
-  const devices = [];
-  const app = makeApp(devices);
-  const a = makeDevice('house-1', app);
-  devices.push(a);
-
-  app.setMQTTHealth('house-1', true, 'first');
-  app.setMQTTHealth('house-1', true, 'again');
-  await new Promise((resolve) => setImmediate(resolve));
-
-  // Capability already true, so neither call writes
-  assert.deepEqual(a.writes, []);
-});
-
-test('sync skips devices without the capability or with unknown health', async () => {
+test('link state is unknown until the first connect, so capabilities are not added early', () => {
   const app = makeApp([]);
+  assert.equal(app.isMQTTLinkDown('house-1'), undefined);
+
+  const device = makeDevice('house-1', app);
+  assert.equal(device._getMQTTLinkDown(), undefined);
+});
+
+test('sync skips devices without the capability', async () => {
+  const app = makeApp([]);
+  app.mqttLinkDown.set('house-1', true);
   const device = makeDevice('house-1', app);
   device.hasCapability = () => false;
-  app.mqttHealthy.set('house-1', false);
-  await device.syncMQTTConnectedCapability();
+  await device.syncMQTTLinkCapability();
   assert.deepEqual(device.writes, []);
-
-  const unknown = makeDevice('house-9', app);
-  await unknown.syncMQTTConnectedCapability();
-  assert.deepEqual(unknown.writes, []);
 });
 
 test('subscription health notifications carry a diagnostic reason', () => {
-  const XSenseAPI = require('../lib/XSenseAPI');
   const calls = [];
   const api = new XSenseAPI('test@example.test', 'secret', {
     app: { log() {}, error() {}, setMQTTHealth: (...args) => calls.push(args) },
@@ -103,16 +125,15 @@ test('subscription health notifications carry a diagnostic reason', () => {
   api.destroy();
 });
 
-test('signature refresh interval defaults to 10 minutes and can be disabled via env', () => {
-  const XSenseAPI = require('../lib/XSenseAPI');
+test('forced signature refresh is off by default and can be enabled via env', () => {
   const make = () => new XSenseAPI('t@example.test', 's', { app: { log() {}, error() {} } });
   const defaulted = make();
-  assert.equal(defaulted.signatureRefreshMs, 600000);
+  assert.equal(defaulted.signatureRefreshMs, 0);
   defaulted.destroy();
 
-  process.env.XSENSE_MQTT_SIGNATURE_REFRESH_MS = '0';
-  const disabled = make();
-  assert.equal(disabled.signatureRefreshMs, 0);
-  disabled.destroy();
+  process.env.XSENSE_MQTT_SIGNATURE_REFRESH_MS = '600000';
+  const enabled = make();
+  assert.equal(enabled.signatureRefreshMs, 600000);
+  enabled.destroy();
   delete process.env.XSENSE_MQTT_SIGNATURE_REFRESH_MS;
 });

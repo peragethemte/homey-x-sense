@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Replace "MQTT Connected" with "MQTT Disconnected" so a healthy link no longer shows as an active alarm on device tiles. Existing devices are migrated automatically; flows using the old capability must be updated.
+- Show the link as disconnected only after 60 seconds without MQTT, and update all devices of the house at once instead of whenever each device happened to receive data.
+- Disable the 10-minute forced MQTT reconnect by default (`XSENSE_MQTT_SIGNATURE_REFRESH_MS` re-enables it).
+- Detect physical test button presses via the `2nd_selftestup` station shadow, so "Smoke test detected" fires and the status returns to OK after 30 seconds.
+- Log MQTT lifecycle events and the reason for every health change.
+
 ## Version 1.1.14
 
 - Share periodic cloud updates between devices on the same station.

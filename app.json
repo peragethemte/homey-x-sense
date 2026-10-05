@@ -1424,6 +1424,16 @@
       "setable": false,
       "uiComponent": "sensor"
     },
+    "alarm_mqtt_disconnected": {
+      "type": "boolean",
+      "title": {
+        "en": "MQTT Disconnected",
+        "de": "MQTT getrennt"
+      },
+      "getable": true,
+      "setable": false,
+      "uiComponent": "sensor"
+    },
     "alarm_muted": {
       "type": "boolean",
       "title": {

@@ -7,6 +7,9 @@ const {
   shouldPollForMQTT,
 } = require('./lib/MQTTPollingPolicy');
 
+// mqtt.js retries every 30s, so this covers one failed reconnect attempt
+const MQTT_LINK_DOWN_GRACE_MS = 60000;
+
 class XSenseApp extends Homey.App {
   /**
    * onInit is called when the app is initialized.
@@ -20,6 +23,9 @@ class XSenseApp extends Homey.App {
     // MQTT Health Tracking (NEW)
     this.mqttHealthy = new Map(); // houseId → boolean
     this.mqttHealthChangedAt = new Map(); // houseId → epoch ms of last change
+    // Displayed link state lags raw health so reconnect blips never reach device tiles
+    this.mqttLinkDown = new Map(); // houseId → boolean
+    this.mqttLinkDownTimers = new Map(); // houseId → pending timeout
 
     // Command guardrails and audit trail
     this.commandCooldowns = new Map();
@@ -434,20 +440,50 @@ class XSenseApp extends Homey.App {
     this.mqttHealthChangedAt.set(houseId, now);
     this.log(`MQTT health house=${houseId}: ${isHealthy ? 'HEALTHY' : 'UNHEALTHY'}${reason ? ` - ${reason}` : ''}${held}`);
 
-    this._pushMQTTHealthToDevices(houseId);
+    if (isHealthy) {
+      this._clearLinkDownTimer(houseId);
+      this._setMQTTLinkDown(houseId, false);
+    } else if (!this.mqttLinkDownTimers.has(houseId) && this.mqttLinkDown.get(houseId) !== true) {
+      this.mqttLinkDownTimers.set(houseId, this.homey.setTimeout(() => {
+        this.mqttLinkDownTimers.delete(houseId);
+        this._setMQTTLinkDown(houseId, true);
+      }, MQTT_LINK_DOWN_GRACE_MS));
+    }
   }
 
-  _pushMQTTHealthToDevices(houseId) {
+  /**
+   * Link state shown on device tiles: undefined until the first connect or timeout,
+   * true only after MQTT has been unhealthy for the full grace period
+   */
+  isMQTTLinkDown(houseId) {
+    return this.mqttLinkDown.get(houseId);
+  }
+
+  _setMQTTLinkDown(houseId, isDown) {
+    if (this.mqttLinkDown.get(houseId) === isDown) return;
+    this.mqttLinkDown.set(houseId, isDown);
+    this.log(`MQTT link house=${houseId}: ${isDown ? 'DOWN' : 'UP'}`);
+    this._pushMQTTLinkToDevices(houseId);
+  }
+
+  _clearLinkDownTimer(houseId) {
+    const timer = this.mqttLinkDownTimers.get(houseId);
+    if (!timer) return;
+    this.homey.clearTimeout(timer);
+    this.mqttLinkDownTimers.delete(houseId);
+  }
+
+  _pushMQTTLinkToDevices(houseId) {
     try {
       for (const driver of Object.values(this.homey.drivers.getDrivers())) {
         for (const device of driver.getDevices()) {
           if (device.deviceData?.houseId !== houseId) continue;
-          if (typeof device.syncMQTTConnectedCapability !== 'function') continue;
-          device.syncMQTTConnectedCapability().catch((error) => this.error('MQTT status push failed:', error));
+          if (typeof device.syncMQTTLinkCapability !== 'function') continue;
+          device.syncMQTTLinkCapability().catch((error) => this.error('MQTT status push failed:', error));
         }
       }
     } catch (error) {
-      this.error('Failed to push MQTT health to devices:', error);
+      this.error('Failed to push MQTT link state to devices:', error);
     }
   }
 
@@ -460,6 +496,7 @@ class XSenseApp extends Homey.App {
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
     }
+    for (const houseId of Array.from(this.mqttLinkDownTimers.keys())) this._clearLinkDownTimer(houseId);
 
     // Cleanup all API clients
     for (const clientOrPromise of this.apiClients.values()) {

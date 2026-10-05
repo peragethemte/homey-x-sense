@@ -147,6 +147,8 @@ class SmokeDetectorDevice extends XSenseDeviceBase {
             .catch(e => this.error('Failed to trigger smoke_test_detected:', e));
         }
         this._prevSmokeStatus = statusText;
+        // A button test is a one-shot event, nothing reports its end
+        if (statusText === 'TEST') this._scheduleTestStatusReset();
       }
 
       // Temperature (some smoke detectors have temperature sensors)
@@ -253,6 +255,16 @@ class SmokeDetectorDevice extends XSenseDeviceBase {
     return promise;
   }
 
+  _scheduleTestStatusReset() {
+    if (this._testResetTimer) this.homey.clearTimeout(this._testResetTimer);
+    this._testResetTimer = this.homey.setTimeout(() => {
+      this._testResetTimer = null;
+      if (this._prevSmokeStatus !== 'TEST') return;
+      this.setCapabilityValue('measure_smoke_status', 'OK').catch(this.error);
+      this._prevSmokeStatus = 'OK';
+    }, 30000);
+  }
+
   /**
    * Test the alarm (triggers a test beep)
    */
@@ -281,13 +293,7 @@ class SmokeDetectorDevice extends XSenseDeviceBase {
             .catch(e => this.error('Failed to trigger smoke_test_detected:', e));
         }
         this._prevSmokeStatus = 'TEST';
-
-        setTimeout(() => {
-          if (this._prevSmokeStatus === 'TEST') {
-            this.setCapabilityValue('measure_smoke_status', 'OK').catch(this.error);
-            this._prevSmokeStatus = 'OK';
-          }
-        }, 30000);
+        this._scheduleTestStatusReset();
       }
 
       return true;
